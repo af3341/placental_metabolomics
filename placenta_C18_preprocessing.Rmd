@@ -1,0 +1,231 @@
+---
+title: "Hermanos_placenta_met_preprocessing"
+author: "Maya Deyssenroth"
+date: "2024-01-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+## load data
+```{r data}
+
+maya_C18<-read.table("data/placenta_c18neg_featuretable.txt", header = TRUE)
+maya_C18_annotation<-read.csv("data/placenta_c18neg_annotation_Stage5.csv", header = TRUE)
+maya_C18_key <- read.table("data/placenta_mapping_c18neg.txt",header=T)
+
+```
+
+## reformat key
+```{r}
+maya_C18_key<-maya_C18_key%>%
+  mutate(File.Name=paste0(File.Name,".mzXML"),
+         Type=ifelse(grepl("nist",Sample.ID),"NIST",
+                     ifelse(grepl("placenta",Sample.ID),"FS","QC")),
+         Sample.ID=str_remove(Sample.ID,"placenta_"),
+         SID=str_remove(Sample.ID,"_[^_]+$"))%>%
+  filter(File.Name%in%names(maya_C18))
+```
+
+
+## relabel sample IDs
+```{r}
+maya_C18<-maya_C18%>%
+  rename_at(vars(maya_C18_key$File.Name), ~ maya_C18_key$SID)
+```
+
+## match annotations
+```{r}
+maya_C18_annotation<-maya_C18_annotation%>%
+  mutate(time=round(time,1),
+         mz=round(mz,5),
+        mz_time=paste0(mz,"_",time))
+
+maya_C18<-maya_C18%>%
+  mutate(time=round(time,1),
+         mz=round(mz,5),
+        mz_time=paste0(mz,"_",time))%>%
+  relocate(mz_time)%>%
+  left_join(maya_C18_annotation %>% select(mz_time,Name,Annotation.confidence.score))%>%
+  relocate(Name,Annotation.confidence.score)%>%
+  distinct(mz_time,.keep_all = T) #11935
+
+maya_C18 %>% 
+  distinct(mz_time)
+
+#check if any NAs - none
+maya_C18 %>%
+  select(2:ncol(.)) %>%  # replace to your needs
+  summarise_all(funs(sum(is.na(.))))
+
+```
+
+
+## proportion of missing features
+```{r}
+maya_missing_output<-maya_C18%>%
+    mutate(missing=rowSums(across(starts_with("S2"),`%in%`,0)))%>%
+    rowwise()%>%
+    mutate(prop=missing/sum(grepl("S2",names(maya_C18)), na.rm = TRUE))%>%
+    select(mz_time,missing,prop)
+
+maya_missing_output%>%
+  ggplot(.,aes(x=prop))+
+  geom_histogram()
+
+#ggsave("normalized_data/C18/Plots/Prop_missing.pdf")
+
+maya_met_data_cutoff<-function(cutoffpercent, columnpattern, outputfile){
+  maya_met_data_cutoff<-maya_C18%>%
+    mutate(missing=rowSums(across(starts_with(columnpattern),`%in%`,0)))%>%
+    rowwise()%>%
+    mutate(prop=missing/sum(grepl("S2",names(C18)), na.rm = TRUE))%>%
+    filter(prop<cutoffpercent)%>%
+    select(-c(missing,prop))#25820
+  write.csv(met_data_output,outputfile,row.names = FALSE)
+  return (met_data_output)
+}
+
+maya_met_data_50cutoff<-met_data_cutoff(0.5,"S2","maya_C18_50cutoff.csv") #10657
+```
+
+## filter out features where RSD of QC > 30%
+```{r}
+
+maya_RSD<-maya_met_data_50cutoff%>%
+  rowwise()%>%
+  mutate(sd=sd(c_across(starts_with("q3",ignore.case = F))),
+         mean=mean(c_across(starts_with("q3",ignore.case = F))),
+         maya_RSD=100*(sd/mean),
+         Threshold=ifelse(maya_RSD>30,"Yes","No"))%>%
+  select(mz_time,sd,mean,RSD,Threshold)
+
+maya_RSD%>%
+  ggplot(.,aes(x=RSD))+
+  geom_histogram()+
+  geom_vline(xintercept=30,colour="red", linetype = "longdash")
+
+#ggsave("normalized_data/placenta_C18/Plots/RSD.pdf")
+
+summary(factor(RSD$Threshold)) #5961; 
+
+met_data_RSD_cutoff<-function(cutoffpercent, columnpattern, outputfile){
+  met_data_output<-met_data_50cutoff%>%
+    rowwise()%>%
+    mutate(sd=sd(c_across(starts_with("q3",ignore.case = F))),
+         mean=mean(c_across(starts_with("q3",ignore.case = F))),
+         RSD=100*(sd/mean))%>%
+    filter(RSD<cutoffpercent)%>%
+    select(-c(sd,mean,RSD))#25820
+  write.csv(met_data_output,outputfile,row.names = FALSE)
+  return (met_data_output)
+}
+
+met_data_50_RSD_cutoff<-met_data_RSD_cutoff(30,"S2","normalized_data/placenta_C18/preprocessing_filter/C18_50cutoff_RSD.csv") #3292
+
+```
+
+## number of features per sample
+```{r}
+met_data_50_RSD_cutoff%>%
+  select(mz_time,starts_with('S2'))%>%
+  pivot_longer(names_to = "Sample", values_to = "value",-c(mz_time))%>%
+  mutate(Sample=ifelse(value==0,NA,Sample))%>% 
+  drop_na(Sample)%>%
+  ggplot(.,aes(Sample))+
+  geom_bar()+
+  theme_bw()+
+  ylab("Number of features")+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(angle=45,vjust=1,hjust=1))
+
+#ggsave("normalized_data/placenta_C18/Plots/C18_analytes_per_sample.pdf")
+```
+
+
+###  Missing value imputation
+```{r missing_imputation}
+met_data_impute<-function(columnpattern, outputfile){
+    met_impute_output<-met_data_50_RSD_cutoff %>%
+    mutate(dummy = min(replace(c_across(starts_with("S2",ignore.case = F)),  c_across(starts_with("S2",ignore.case = F)) == 0, NA), na.rm = T)/sqrt(2)) %>%
+    ungroup() %>%
+    mutate(across(starts_with("S2"), ~ifelse(. == 0, dummy, .)))%>%
+    select(-c(dummy))
+write.csv(met_impute_output,outputfile,row.names = FALSE)
+return(met_impute_output)
+}
+
+met_data_50_RSD_impute<-met_data_impute("S2","normalized_data/placenta_C18/preprocessing_filter/C18_50cutoff_RSD_impute.csv")
+```
+
+
+### log transform data
+```{r}
+met_norm_log2<-met_data_50_RSD_impute%>%
+  mutate(across(starts_with("S2"),log2))
+```
+
+
+### pareto scaling
+```{r pareto, message=FALSE, warning=FALSE}
+
+paretoscale <- function(z){
+  rowMean <- apply(z, 1, mean)                         # row means
+  rowMAD <- apply(z, 1, mad)                           # row standard deviation
+  rowSqrtSD <- sqrt(rowMAD)                            # sqrt(SD)
+  cv <- sweep(z, 1, rowMean, "-")                      # mean center
+  cv <- sweep(cv, 1, rowSqrtSD, "/")                  # divide by sqrt(SD)
+  return(cv) 
+}
+
+met_log_pareto <- paretoscale(met_norm_log2[,c(grepl("S2",names(met_norm_log2)))]) 
+met_log_pareto<-cbind(met_norm_log2[,!names(met_norm_log2)%in%names(met_log_pareto)],met_log_pareto)
+
+met_log_pareto<-met_log_pareto%>%
+  select(Name,Annotation.confidence.score,mz_time,starts_with("S2"))
+
+#test<-met_norm_log2%>%
+#  mutate(across(starts_with("S2"),paretoscale))
+
+saveRDS(met_log_pareto,"normalized_data/placenta_C18/preprocessing_filter/C18_50cutoff_RSD_norm_scaled.rds")
+```
+
+
+### most abundant metabolites
+```{r}
+
+top.abundance<-met_log_pareto%>%
+  drop_na(Name)%>%
+  filter(Annotation.confidence.score>0)%>%
+  pivot_longer(names_to = "Sample", values_to = "value",-c(mz_time,Name,Annotation.confidence.score))%>%
+  group_by(mz_time)%>% 
+  mutate(Median=median(value))%>%
+  distinct(mz_time,Median,.keep_all = T)%>%
+  ungroup()%>%
+  slice_max(Median,n=20)%>%
+  select(mz_time,Name,Annotation.confidence.score,Median)
+
+met_log_pareto%>%
+  filter(mz_time%in%top.abundance$mz_time)%>%
+  pivot_longer(names_to = "Sample", values_to = "value",-c(mz_time,Name,Annotation.confidence.score))%>%
+  ggplot(.,aes(x=reorder(Name, value, FUN = median),y=value))+
+  geom_boxplot()+
+  geom_jitter(shape=16, alpha=0.5,position=position_jitter(0.2))+
+  theme_bw()+
+  ylab("Metabolite abundance")+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(angle=45,vjust=1,hjust=1))
+
+ggsave("normalized_data/placenta_C18/Plots/C18_abundant_annotated.pdf")
+```
+

@@ -1,0 +1,298 @@
+---
+title: "placenta_c18data_cleaning"
+author: "Alana Ferris"
+date: "2024-02-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+# Reading in the placenta c18 data
+```{r}
+placenta_c18 =
+  read.table("data/placenta_c18neg_featuretable.txt", header = TRUE)
+  
+placenta_c18_annotation =
+  read.csv("data/placenta_c18neg_annotation_Stage5.csv", header = TRUE) %>% 
+  janitor::clean_names()
+
+placenta_c18_key =
+  read.table("data/placenta_mapping_c18neg.txt", header = TRUE) %>% 
+  janitor::clean_names()
+```
+
+## placenta_c18_key: separating info in sample_id column to create a new, clean, sample id called "sid"
+```{r}
+placenta_c18_key <-
+  placenta_c18_key %>%
+  mutate(file_name = paste0(file_name, ".mzXML"),
+         type = ifelse(grepl("nist", sample_id), "NIST",
+                     ifelse(grepl("placenta", sample_id), "FS", "QC")),
+         sample_id = str_remove(sample_id,"placenta_"),
+         sid = str_remove(sample_id,"_[^_]+$")) %>%
+  filter(file_name%in%names(placenta_c18))
+```
+
+## placenta_c18: renaming sample ids to the clean sid made in placenta_c18_key
+```{r}
+placenta_c18 <- 
+  placenta_c18 %>%
+  rename_at(vars(placenta_c18_key$file_name), ~ placenta_c18_key$sid)
+```
+
+## placenta_c18_annotation: matching annotations
+AKA names of compounds (based on mz and time) identified in their library or public databases to our features detected in each sample id
+```{r}
+placenta_c18_annotation <-
+  placenta_c18_annotation %>%
+  mutate(time = round(time, 1),
+         mz = round(mz, 5),
+        mz_time = paste0(mz, "_", time))
+
+placenta_c18 <-
+  placenta_c18 %>%
+  mutate(time = round(time, 1),
+         mz = round(mz, 5),
+         mz_time = paste0(mz, "_", time)) %>%
+  relocate(mz_time) %>% #use relocate to change column positions, like select()
+  left_join(placenta_c18_annotation %>% 
+              select(mz_time, name, annotation_confidence_score)) %>%
+  relocate(name, annotation_confidence_score) %>%
+  distinct(mz_time, .keep_all = T) #11935
+
+placenta_c18 %>% 
+  distinct(mz_time)
+
+
+#check if any NAs - none
+placenta_c18 %>%
+  select(2:ncol(.)) %>%  # replace to your needs
+  summarise_all(funs(sum(is.na(.))))
+#8560 NAs in annotation_confidence_score but none otherwise 
+```
+
+# placenta_c18: proportion of missing features
+```{r}
+missing_output <- placenta_c18 %>%
+    mutate(missing = rowSums(across(starts_with("S2"), `%in%`, 0))) %>%
+    rowwise() %>%
+    mutate(prop = missing/sum(grepl("S2",names(placenta_c18)), na.rm = TRUE)) %>%
+    select(mz_time, missing, prop)
+
+missing_output %>%
+  ggplot(., aes(x = prop)) +
+  geom_histogram()
+
+ggsave("placenta_c18_Prop_missing.pdf")
+# come back to save this output?
+
+met_data_cutoff <- 
+  function(cutoffpercent, columnpattern, outputfile){
+  met_data_output <- placenta_c18 %>%
+    mutate(missing = rowSums(across(starts_with(columnpattern),`%in%`,0))) %>%
+    rowwise() %>%
+    mutate(prop = missing/sum(grepl("S2",names(placenta_c18)), na.rm = TRUE)) %>%
+    filter(prop < cutoffpercent) %>%
+    select(-c(missing, prop)) 
+  write.csv(met_data_output, outputfile, row.names = FALSE) 
+  return(met_data_output)
+}
+
+met_data_50cutoff <- 
+  met_data_cutoff(0.5,"S2","placenta_c18_50cutoff.csv") #9872 obs
+```
+
+## placenta_c18: filter out features where RSD of QC > 30%
+exactly like it sounds, in this step we are filtering out data that is not "high quality" 
+```{r}
+## dont have to rsd step bc qc samples are commercially available plasma so we can jsut remove them 
+## they ran the samples in triplicate and we are getting the average and if concordance is <75% features are dropped 
+rsd <- 
+  met_data_50cutoff %>%
+  rowwise() %>%
+  mutate(sd = sd(c_across(starts_with("q3",ignore.case = F))),
+         mean = mean(c_across(starts_with("q3",ignore.case = F))),
+         rsd = 100*(sd/mean),
+         threshold = ifelse(rsd > 30,"Yes","No")) %>%
+  select(mz_time, sd, mean, rsd, threshold) #this will take a minute to run
+
+rsd %>%
+  ggplot(., aes(x = rsd)) +
+  geom_histogram() +
+  geom_vline(xintercept = 30, colour="red", linetype = "longdash")
+
+#ggsave("placenta_RSD.pdf") 
+
+summary(factor(rsd$threshold)) #3292 below threshold; but i also see i have 666 NAs...why 
+
+met_data_rsd_cutoff <- function(cutoffpercent, columnpattern, outputfile){
+  met_data_output <- met_data_50cutoff %>%
+    rowwise() %>%
+    mutate(sd = sd(c_across(starts_with("q3",ignore.case = F))),
+         mean = mean(c_across(starts_with("q3",ignore.case = F))),
+         rsd = 100*(sd/mean)) %>%
+    filter(rsd < cutoffpercent) %>%
+    select(-c(sd, mean, rsd)) #25820 <- this number again idk what it is 
+  write.csv(met_data_output, outputfile, row.names = FALSE)
+  return (met_data_output)
+}
+
+met_data_50_rsd_cutoff <- met_data_rsd_cutoff(30,"S2","placenta_C18_50cutoff_RSD.csv") #3292 don't pass...this takes a minute to run
+
+```
+
+# placenta_c18: number of features per sample 
+```{r}
+met_data_50_rsd_cutoff %>%
+  select(mz_time, starts_with('S2')) %>%
+  pivot_longer(names_to = "sample", values_to = "value", -c(mz_time)) %>%
+  mutate(sample = ifelse(value == 0, NA, sample)) %>% 
+  drop_na(sample) %>%
+  ggplot(., aes(sample)) +
+  geom_bar() +
+  theme_bw() +
+  ylab("Number of features") +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1)) #there are about equal number of features per sample, S21000 has about 1000 less features than everyone else .. # downstream analyses its an outlier, but look 
+
+#ggsave("placenta_c18_analytes_per_sample.pdf")
+```
+
+# placenta_c18: missing value imputation (mice)
+```{r}
+library(mice)
+library(dplyr)
+library(patchwork)
+
+#replacing all 0 occurrences with NAs so that I can impute values for the NAs
+met_data_replace <-
+  met_data_50_rsd_cutoff %>% 
+  ungroup() %>% 
+  mutate(across(starts_with("S2"), ~ ifelse(. == "0", "", .))) %>%
+  mutate(across(starts_with("S2"), as.numeric))
+
+summary(met_data_replace)
+
+# now trying 2 different imputation methods. tried pmm but it wasn't working so I gave up.
+# met_data_imputed <- 
+#   data.frame(
+#   original = met_data_replace$S2036,
+#   #imputed_pmm = complete(mice(met_data_replace, method = "pmm"))$S2036,
+#   imputed_cart = complete(mice(met_data_replace, method = "cart"))$S2036,
+#   imputed_lasso = complete(mice(met_data_replace, method = "lasso.norm"))$S2036
+# )
+# 
+# met_data_imputed
+# summary(met_data_imputed)
+
+#lasso imputing negative values which i don't think are possible
+
+# h1 <- ggplot(met_data_imputed, aes(x = original)) +
+#   geom_histogram(fill = "#ad1538", color = "#000000", position = "identity") +
+#   ggtitle("Original distribution") +
+#   theme_classic()
+# h2 <- ggplot(met_data_imputed, aes(x = imputed_cart)) +
+#   geom_histogram(fill = "#1543ad", color = "#000000", position = "identity") +
+#   ggtitle("CART-imputed distribution") +
+#   theme_classic()
+# h3 <- ggplot(met_data_imputed, aes(x = imputed_lasso)) +
+#   geom_histogram(fill = "#ad8415", color = "#000000", position = "identity") +
+#   ggtitle("LASSO-imputed distribution") +
+#   theme_classic()
+# 
+# h1 + h2 + h3 + plot_layout(nrow = 2, ncol = 2)
+
+# since lasso didn't seem the best, going to impute using cart
+#whole data imputation...
+
+#ctrl + shift + c to gray out a chunk of code 
+# only_samples =
+#   met_data_replace %>% 
+#   select(-name, -annotation_confidence_score, -mz_time, -mz, -time, )
+
+set.seed(12345)
+
+#need to discuss what should or shouldn't be used as a predictor?
+
+met_data_impute_2 <-
+  mice(met_data_replace, m = 5, method = "cart", seed = 1000)
+# last time i did imputation i did m=10 but just to save time i am making it 5 for now, i also think that is the standard 
+
+#get imputations back to make a completed data 
+cart_complete_met_data <- complete(met_data_impute_2,1)
+
+#plot distribution of original and imputed data 
+densityplot(met_data_impute_2) #the original and imputed distribution look similar but tends to overestimate 
+# The imputed curve (in red) plots the density of the mean imputation over the m datasets. That is, for each cell that is missing in the variable, the diagnostic will find the mean of that cell across each of the m datasets and use that value for the density plot. The black distributions are the those of the observed data. When variables are completely observed, their densities are plotted in blue
+
+stripplot(met_data_impute_2, pch = 20, cex = 1.2) #this isnt showing anything idk what its supposed to be showing
+
+#for more info on imputing https://cran.r-project.org/web/packages/Amelia/vignettes/diagnostics.html
+
+```
+
+### c_18_ftr_table: log transform data
+```{r}
+met_norm_log2 <- 
+  cart_complete_met_data %>%
+  mutate(across(starts_with("S2"), log2))
+```
+
+### pareto scaling
+A form of normalization, scale it to the mean and sd of each feature by subtracting the mean from all samples and dividing by standard deviation 
+```{r pareto, message=FALSE, warning=FALSE}
+
+paretoscale <- function(z){
+  rowMean <- apply(z, 1, mean)                         # row means
+  rowMAD <- apply(z, 1, mad)                           # row standard deviation
+  rowSqrtSD <- sqrt(rowMAD)                            # sqrt(SD)
+  cv <- sweep(z, 1, rowMean, "-")                      # mean center
+  cv <- sweep(cv, 1, rowSqrtSD, "/")                  # divide by sqrt(SD)
+  return(cv) 
+}
+
+met_log_pareto <- paretoscale(met_norm_log2[,c(grepl("S2",names(met_norm_log2)))]) 
+met_log_pareto <- cbind(met_norm_log2[,!names(met_norm_log2)%in%names(met_log_pareto)],met_log_pareto)
+
+met_log_pareto<-met_log_pareto%>%
+  select(name, annotation_confidence_score, mz_time, starts_with("S2"))
+
+#test<-met_norm_log2%>%
+#  mutate(across(starts_with("S2"),paretoscale))
+
+#saveRDS(met_log_pareto,"placenta_C18_50cutoff_RSD_norm_scaled.rds")
+```
+
+### most abundant metabolites
+```{r}
+top.abundance <- met_log_pareto %>%
+  drop_na(name) %>%
+  filter(annotation_confidence_score > 0) %>%
+  pivot_longer(names_to = "Sample", 
+               values_to = "value", 
+               -c(mz_time, name, annotation_confidence_score)) %>%
+  group_by(mz_time) %>% 
+  mutate(median = median(value)) %>%
+  distinct(mz_time, median, .keep_all = T) %>%
+  ungroup() %>%
+  slice_max(median, n = 20) %>%
+  select(mz_time, name, annotation_confidence_score, median)
+
+met_log_pareto %>%
+  filter(mz_time%in%top.abundance$mz_time) %>%
+  pivot_longer(names_to = "Sample", values_to = "value", -c(mz_time, name, annotation_confidence_score)) %>%
+  ggplot(., aes(x = reorder(name, value, FUN = median), y = value)) +
+  geom_boxplot() +
+  geom_jitter(shape = 16, alpha = 0.5, position = position_jitter(0.2)) +
+  theme_bw() +
+  ylab("Metabolite abundance") +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 1,hjust = 1))
+
+#ggsave("placenta_C18_abundant_annotated.pdf")
+```
+
+
