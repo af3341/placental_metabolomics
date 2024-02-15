@@ -188,20 +188,20 @@ summary(met_data_imputed)
 
 #lasso imputing negative values which i don't think are possible
 
-h1 <- ggplot(met_data_imputed, aes(x = original)) +
-  geom_histogram(fill = "#ad1538", color = "#000000", position = "identity") +
-  ggtitle("Original distribution") +
-  theme_classic()
-h2 <- ggplot(met_data_imputed, aes(x = imputed_cart)) +
-  geom_histogram(fill = "#1543ad", color = "#000000", position = "identity") +
-  ggtitle("CART-imputed distribution") +
-  theme_classic()
-h3 <- ggplot(met_data_imputed, aes(x = imputed_lasso)) +
-  geom_histogram(fill = "#ad8415", color = "#000000", position = "identity") +
-  ggtitle("LASSO-imputed distribution") +
-  theme_classic()
-
-h1 + h2 + h3 + plot_layout(nrow = 2, ncol = 2)
+# h1 <- ggplot(met_data_imputed, aes(x = original)) +
+#   geom_histogram(fill = "#ad1538", color = "#000000", position = "identity") +
+#   ggtitle("Original distribution") +
+#   theme_classic()
+# h2 <- ggplot(met_data_imputed, aes(x = imputed_cart)) +
+#   geom_histogram(fill = "#1543ad", color = "#000000", position = "identity") +
+#   ggtitle("CART-imputed distribution") +
+#   theme_classic()
+# h3 <- ggplot(met_data_imputed, aes(x = imputed_lasso)) +
+#   geom_histogram(fill = "#ad8415", color = "#000000", position = "identity") +
+#   ggtitle("LASSO-imputed distribution") +
+#   theme_classic()
+# 
+# h1 + h2 + h3 + plot_layout(nrow = 2, ncol = 2)
 
 # since lasso didn't seem the best, going to impute using cart
 #whole data imputation...
